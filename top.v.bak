@@ -1,0 +1,375 @@
+module top(
+	input clk,
+	input ps2_clk,
+	input ps2_data,
+	input key_0,
+	output [7:0] vga_r,
+	output [7:0] vga_g,
+	output [7:0] vga_b,
+	output vga_blank_n,
+	output vga_clk,
+	output vga_hs,
+	output vga_vs,
+	output reg vga_sync_n);
+
+parameter MAX_SPEED = 3; //最大移动速度
+parameter MIN = 0; //最小边界
+parameter CHAR_NUM = 32 - 1; //缓存中的点的数量
+parameter BUF_SIZE = 38400;
+
+wire [7:0] ascii;
+wire [9:0] h_addr;
+wire [9:0] v_addr;
+wire [23:0] vga_data;
+
+clkgen #(25000000) my_vgaclk(clk, 1'b0, 1'b1, vga_clk);
+
+vga_ctrl my_vga(vga_clk,1'b0,vga_data,h_addr,v_addr,vga_hs,vga_vs,vga_blank_n,vga_r,vga_g,vga_b);
+
+keyboard mykey(
+	.clk(clk), 
+	.clrn(1'b1), 
+	.ps2_clk(ps2_clk), 
+	.ps2_data(ps2_data), 
+	.data(), 
+	.ascii(ascii), 
+	.d_digit(), 
+	.a_digit(), 
+	.c_digit(), 
+	.count(), 
+	.ctrl(), 
+	.shift(), 
+	.up(), 
+	.caps()
+);
+
+// integer x, y;
+reg [15:0] cont_wr;
+reg [15:0] cont;
+reg [31:0] clear_num; // 先将显存清零
+reg buf_choice; // 选择使用哪一个显存
+reg [7:0] buf_text;
+reg  [15:0] write_addr;
+wire [15:0] read_addr;
+reg [11:0] char_x  	 [0:CHAR_NUM];
+reg [11:0] char_y    [0:CHAR_NUM];
+reg [11:0] temp_y;
+reg [2:0]  char_v    [0:CHAR_NUM]; //每个char移动的速度
+reg [7:0]  char_text [0:CHAR_NUM]; //每个char的ASCII码
+reg [CHAR_NUM:0] char_valid; //每个char是否有效
+reg [7:0] num_valid; //当前有效的char的数量，若等于CHAR_NUM，则不再生成
+reg is_char; //当前像素点在一个有效的char的显示范围内为1；若为0，则当前显示的vga_ascii为0
+reg [7:0] vga_ascii; //当前像素点要显示的char的ASCII码
+
+// 字体的颜色
+reg [3:0] char_color [0:CHAR_NUM];
+reg [3:0] buf_color;
+
+// FPS, HIT, MISS, TIME等标志信息显示
+reg [11:0] LABEL_x [0:31];
+reg [11:0] LABEL_y [0:31];
+reg [11:0] LABEL_text [0:31];
+reg [3:0]  LABEL_color [0:31];
+reg LABEL_valid [0:31];
+reg [7:0] cont_LABEL;
+
+initial begin
+	buf_choice = 0;
+	buf_color = 0;
+	num_valid  = 0;
+	char_valid = 0;
+	is_char = 0;
+	clear_num = 0;
+	cont = 0;
+	cont_wr = 0;
+	cont_LABEL = 0;
+
+	// 标志信息设定
+	// FPS
+	LABEL_x[0] = 16;
+	LABEL_y[0] = 16;
+	LABEL_text[0] = 8'h46; // F
+	LABEL_color[0] = 4'h0; // white
+	LABEL_valid[0] = 1;
+
+	LABEL_x[1] = 24;
+	LABEL_y[1] = 16;
+	LABEL_text[1] = 8'h50; // P
+	LABEL_color[1] = 4'h0; // white
+	LABEL_valid[1] = 1;
+
+	LABEL_x[2] = 32;
+	LABEL_y[2] = 16;
+	LABEL_text[2] = 8'h53; // S
+	LABEL_color[2] = 4'h0; // white
+	LABEL_valid[2] = 1;
+
+	LABEL_x[3] = 40;
+	LABEL_y[3] = 16;
+	LABEL_text[3] = 8'h3A; // :
+	LABEL_color[3] = 4'h0; // white
+	LABEL_valid[3] = 1;
+
+	LABEL_x[4] = 56;
+	LABEL_y[4] = 16;
+	LABEL_text[4] = 8'h30; // 0
+	LABEL_color[4] = 4'h0; // white
+	LABEL_valid[4] = 1;
+
+	LABEL_x[5] = 64;
+	LABEL_y[5] = 16;
+	LABEL_text[5] = 8'h36; // 6
+	LABEL_color[5] = 4'h0; // white
+	LABEL_valid[5] = 1;
+
+	LABEL_x[6] = 72;
+	LABEL_y[6] = 16;
+	LABEL_text[6] = 8'h30; // 0
+	LABEL_color[6] = 4'h0; // white
+	LABEL_valid[6] = 1;
+
+	// TIME
+	LABEL_x[7] = 16;
+	LABEL_y[7] = 32;
+	LABEL_text[7] = 8'h54; // T
+	LABEL_color[7] = 4'h3; // blue
+	LABEL_valid[7] = 1;
+
+	LABEL_x[8] = 24;
+	LABEL_y[8] = 32;
+	LABEL_text[8] = 8'h49; // I
+	LABEL_color[8] = 4'h3; // blue
+	LABEL_valid[8] = 1;
+
+	LABEL_x[9] = 32;
+	LABEL_y[9] = 32;
+	LABEL_text[9] = 8'h4D; // M
+	LABEL_color[9] = 4'h3; // blue
+	LABEL_valid[9] = 1;
+
+	LABEL_x[10] = 40;
+	LABEL_y[10] = 32;
+	LABEL_text[10] = 8'h45; // E
+	LABEL_color[10] = 4'h3; // blue
+	LABEL_valid[10] = 1;
+
+	LABEL_x[11] = 48;
+	LABEL_y[11] = 32;
+	LABEL_text[11] = 8'h3A; // :
+	LABEL_color[11] = 4'h3; // blue
+	LABEL_valid[11] = 1;
+
+	LABEL_x[12] = 56;
+	LABEL_y[12] = 32;
+	LABEL_text[12] = 8'h30; // 0
+	LABEL_color[12] = 4'h3; // blue
+	LABEL_valid[12] = 1;
+
+	LABEL_x[13] = 64;
+	LABEL_y[13] = 32;
+	LABEL_text[13] = 8'h30; // 0
+	LABEL_color[13] = 4'h3; // blue
+	LABEL_valid[13] = 1;
+
+	LABEL_x[14] = 72;
+	LABEL_y[14] = 32;
+	LABEL_text[14] = 8'h30; // 0
+	LABEL_color[14] = 4'h3; // blue
+	LABEL_valid[14] = 1;
+
+	// HIT
+	LABEL_x[15] = 16;
+	LABEL_y[15] = 64;
+	LABEL_text[15] = 8'h48; // H
+	LABEL_color[15] = 4'h2; // green
+	LABEL_valid[15] = 1;
+
+	LABEL_x[16] = 24;
+	LABEL_y[16] = 64;
+	LABEL_text[16] = 8'h49; // I
+	LABEL_color[16] = 4'h2; // green
+	LABEL_valid[16] = 1;
+
+	LABEL_x[17] = 32;
+	LABEL_y[17] = 64;
+	LABEL_text[17] = 8'h54; // T
+	LABEL_color[17] = 4'h2; // green
+	LABEL_valid[17] = 1;
+
+	LABEL_x[18] = 40;
+	LABEL_y[18] = 64;
+	LABEL_text[18] = 8'h3A; // :
+	LABEL_color[18] = 4'h2; // green
+	LABEL_valid[18] = 1;
+
+	LABEL_x[19] = 56;
+	LABEL_y[19] = 64;
+	LABEL_text[19] = 8'h30; // 0
+	LABEL_color[19] = 4'h2; // green
+	LABEL_valid[19] = 1;
+
+	LABEL_x[20] = 64;
+	LABEL_y[20] = 64;
+	LABEL_text[20] = 8'h30; // 0
+	LABEL_color[20] = 4'h2; // green
+	LABEL_valid[20] = 1;
+
+	LABEL_x[21] = 72;
+	LABEL_y[21] = 64;
+	LABEL_text[21] = 8'h30; // 0
+	LABEL_color[21] = 4'h2; // green
+	LABEL_valid[21] = 1;
+
+	// MISS
+	LABEL_x[22] = 16;
+	LABEL_y[22] = 80;
+	LABEL_text[22] = 8'h4D; // M
+	LABEL_color[22] = 4'h1; // red
+	LABEL_valid[22] = 1;
+
+	LABEL_x[23] = 24;
+	LABEL_y[23] = 80;
+	LABEL_text[23] = 8'h49; // I
+	LABEL_color[23] = 4'h1; // red
+	LABEL_valid[23] = 1;
+
+	LABEL_x[24] = 32;
+	LABEL_y[24] = 80;
+	LABEL_text[24] = 8'h53; // S
+	LABEL_color[24] = 4'h1; // red
+	LABEL_valid[24] = 1;
+
+	LABEL_x[25] = 40;
+	LABEL_y[25] = 80;
+	LABEL_text[25] = 8'h53; // S
+	LABEL_color[25] = 4'h1; // red
+	LABEL_valid[25] = 1;
+
+	LABEL_x[26] = 48;
+	LABEL_y[26] = 80;
+	LABEL_text[26] = 8'h3A; // :
+	LABEL_color[26] = 4'h1; // red
+	LABEL_valid[26] = 1;
+
+	LABEL_x[27] = 56;
+	LABEL_y[27] = 80;
+	LABEL_text[27] = 8'h30; // 0
+	LABEL_color[27] = 4'h1; // red
+	LABEL_valid[27] = 1;
+
+	LABEL_x[28] = 64;
+	LABEL_y[28] = 80;
+	LABEL_text[28] = 8'h30; // 0
+	LABEL_color[28] = 4'h1; // red
+	LABEL_valid[28] = 1;
+
+	LABEL_x[29] = 72;
+	LABEL_y[29] = 80;
+	LABEL_text[29] = 8'h30; // 0
+	LABEL_color[29] = 4'h1; // red
+	LABEL_valid[29] = 1;
+
+	// TEST_CASES
+	char_x[10] = 128;
+	char_y[10] = 0;
+	char_text[10] = 8'h32;
+	char_v[10] = 1;
+	char_valid[10] = 1;
+	char_color[10] = 1;
+
+	char_x[11] = 400;
+	char_y[11] = 400;
+	char_text[11] = 8'h36;
+	char_v[11] = 2;
+	char_valid[11] = 1;
+	char_color[11] = 0;
+
+	char_x[12] = 600;
+	char_y[12] = 400;
+	char_text[12] = 8'h48;
+	char_v[12] = 1;
+	char_valid[12] = 1;
+	char_color[12] = 3;
+end                         
+// vga显示
+always @ (posedge vga_clk) begin
+	if (v_addr == 479 && h_addr == 639) begin
+		buf_choice <= ~buf_choice;
+		cont <= 0;
+		clear_num <= 0;
+		cont_LABEL <= 0;
+	end
+	if (clear_num < BUF_SIZE) begin
+		clear_num <= clear_num + 1;
+		is_char <= 0;
+		write_addr <= clear_num;
+	end else begin
+		if (cont <= CHAR_NUM) begin
+			if (char_valid[cont]==1) begin
+				temp_y <= char_y[cont] + char_v[cont]; //下一帧中char_y的位置
+				buf_text <= char_text[cont];
+				buf_color <= char_color[cont];
+				if (cont_wr<8) begin
+					write_addr <= (char_x[cont]>>3) + (temp_y*64) + (temp_y*16) + cont_wr*64 + cont_wr*16;
+					cont_wr <= cont_wr + 1;
+					is_char <= 1;
+				end else begin
+					if (temp_y <= 480)
+						char_y[cont] <= temp_y; //进行更新
+					else
+						char_y[cont] <= 0; //可能要删掉
+					buf_text <= 0;
+					write_addr <= 0;
+					cont <= cont + 1;
+					cont_wr <= 0;
+					is_char <= 0;
+				end
+			end else begin
+				char_y[cont] <= 0; //当前结点无效，直接把char_y置0
+				buf_text <= 0;
+				write_addr <= 0;
+				cont <= cont + 1;
+				cont_wr <= 0;
+				is_char <= 0;
+			end
+		end else if (cont_LABEL<=31) begin
+			if (LABEL_valid[cont_LABEL]==1) begin
+				buf_text <= LABEL_text[cont_LABEL];
+				buf_color <= LABEL_color[cont_LABEL];
+				if (cont_wr<8) begin
+					write_addr <= (LABEL_x[cont_LABEL]>>3) + (LABEL_y[cont_LABEL]*64) + (LABEL_y[cont_LABEL]*16) + cont_wr*64 + cont_wr*16;
+					cont_wr <= cont_wr + 1;
+					is_char <= 1;
+				end else begin
+					buf_text <= 0;
+					write_addr <= 0;
+					cont_LABEL <= cont_LABEL + 1;
+					cont_wr <= 0;
+					is_char <= 0;
+				end
+			end
+		end
+	end
+end
+
+wire [7:0] row;
+char_trans ct((buf_text*8)+cont_wr-1, ~vga_clk, row);
+
+wire [11:0] buf_write;
+
+assign buf_write = {buf_color, row};
+assign read_addr = ((h_addr+2)>>3) + (v_addr*64) + (v_addr*16);
+
+wire boader;
+assign boader = (h_addr == 116);
+
+wire [11:0] out_data_1;
+wire [11:0] out_data_2;
+vga_buf   fb(vga_clk, buf_write, read_addr, write_addr, buf_choice, out_data_1);
+vga_buf_t fb1(vga_clk, buf_write, read_addr, write_addr, ~buf_choice, out_data_2);
+
+wire [11:0] out_data;
+assign out_data = boader? 12'h0ff : buf_choice? out_data_2 : out_data_1;
+assign vga_data = (out_data[h_addr - (h_addr>>3)*8]==0)? 24'h000000: (out_data[11:8]==1)? 24'hff0000: (out_data[11:8]==2)? 24'h00ff00: (out_data[11:8]==3)? 24'h00f0ff:24'hffffff;
+
+endmodule
